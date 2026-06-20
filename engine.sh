@@ -24,6 +24,34 @@ set_state() {
     sync 2>/dev/null || true
 }
 
+# ================== Robust LED Path Detection ==================
+detect_led() {
+    # First try config
+    if [ -d "/sys/class/leds/$LED_NAME" ]; then
+        LED_PATH="/sys/class/leds/$LED_NAME"
+        return 0
+    fi
+
+    # Smart detection for Google Wifi AC1304 and others
+    for L in /sys/class/leds/*; do
+        case "$(basename "$L")" in
+            *status*|*white*|*blue*|*internet*|*wan*|*power*)
+                if [ "$(basename "$L")" != "power" ]; then
+                    LED_PATH="$L"
+                    echo "Using LED: $LED_PATH" | logger -t passwallled
+                    return 0
+                fi
+                ;;
+        esac
+    done
+
+    # Last fallback
+    LED_PATH=$(ls /sys/class/leds/ 2>/dev/null | grep -E 'status|white|blue|wan' | head -n1)
+    [ -n "$LED_PATH" ] && LED_PATH="/sys/class/leds/$LED_PATH"
+}
+
+detect_led
+
 LAST_STATE=""
 FLAP_COUNT=0
 
@@ -32,6 +60,7 @@ while true; do
     NOW=$(date +%s)
     STATE=$(get_state)
 
+    # Metrics & Logic (همان قبلی، بدون تغییر)
     if [ -f "$CACHE" ]; then
         READ_TIME=$(head -n1 "$CACHE" 2>/dev/null | cut -d'|' -f2 || echo 0)
         if [ $((NOW - READ_TIME)) -lt 5 ]; then
@@ -80,6 +109,7 @@ EOF
     fi
     [ "$NET" -eq 0 ] && SCORE=0
 
+    # FSM ...
     case "$STATE" in
         S0) NEW=$([ "$NET" -eq 1 ] && echo "S1" || echo "S0") ;;
         S1) NEW=$([ "$VPN" -eq 1 ] && echo "S2" || echo "S1") ;;
@@ -113,42 +143,41 @@ EOF
     echo "v3|$NOW|$VPN|$NET|$LAT|$SCORE|$STATE" > "$CACHE"
     release_lock
 
-    if [ ! -d "$LED_PATH" ]; then
-        for L in /sys/class/leds/*; do
-            case "$(basename "$L")" in
-                *status*|*internet*|*wan*|*blue*|*white*)
-                    LED_PATH="$L"; break ;;
-            esac
-        done
-        [ ! -d "$LED_PATH" ] && LED_PATH="/sys/class/leds/$(ls /sys/class/leds/ 2>/dev/null | grep -E 'status|wan|internet' | head -n1)"
+    # ================== Fixed LED Control ==================
+    if [ -z "$LED_PATH" ] || [ ! -d "$LED_PATH" ]; then
+        detect_led
     fi
 
-    {
-        echo none > "$LED_PATH/trigger" 2>/dev/null || true
-        case "$STATE" in
-            S2) echo heartbeat > "$LED_PATH/trigger" ;;
-            S3)
-                echo timer > "$LED_PATH/trigger"
-                echo 500 > "$LED_PATH/delay_on"
-                echo 700 > "$LED_PATH/delay_off"
-                ;;
-            S4)
-                echo timer > "$LED_PATH/trigger"
-                echo 200 > "$LED_PATH/delay_on"
-                echo 200 > "$LED_PATH/delay_off"
-                ;;
-            S6)
-                echo timer > "$LED_PATH/trigger"
-                echo 80 > "$LED_PATH/delay_on"
-                echo 80 > "$LED_PATH/delay_off"
-                ;;
-            S1) echo default-on > "$LED_PATH/trigger" ;;
-            S0|*)
-                echo none > "$LED_PATH/trigger"
-                echo 0 > "$LED_PATH/brightness" 2>/dev/null || true
-                ;;
-        esac
-    } &
+    if [ -n "$LED_PATH" ] && [ -d "$LED_PATH" ]; then
+        {
+            echo none > "$LED_PATH/trigger" 2>/dev/null || true
+            case "$STATE" in
+                S2) echo heartbeat > "$LED_PATH/trigger" ;;
+                S3)
+                    echo timer > "$LED_PATH/trigger"
+                    echo 500 > "$LED_PATH/delay_on"
+                    echo 700 > "$LED_PATH/delay_off"
+                    ;;
+                S4)
+                    echo timer > "$LED_PATH/trigger"
+                    echo 200 > "$LED_PATH/delay_on"
+                    echo 200 > "$LED_PATH/delay_off"
+                    ;;
+                S6)
+                    echo timer > "$LED_PATH/trigger"
+                    echo 80 > "$LED_PATH/delay_on"
+                    echo 80 > "$LED_PATH/delay_off"
+                    ;;
+                S1) echo default-on > "$LED_PATH/trigger" ;;
+                *) 
+                    echo none > "$LED_PATH/trigger"
+                    echo 0 > "$LED_PATH/brightness" 2>/dev/null || true
+                    ;;
+            esac
+        } &
+    else
+        logger -t passwallled "Warning: No valid LED found"
+    fi
 
     if [ "$STATE" != "$LAST_STATE" ]; then
         logger -p daemon.info -t passwallled "State:${STATE} Score:${SCORE} Lat:${LAT} VPN:${VPN} Net:${NET}"
