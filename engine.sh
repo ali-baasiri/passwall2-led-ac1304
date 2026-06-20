@@ -1,7 +1,6 @@
 #!/bin/sh
 . /root/passwall2-led-ac1304/core/config.sh
 
-# ================== Atomic Lock ==================
 acquire_lock() {
     while ! mkdir "$LOCK_DIR" 2>/dev/null; do
         if [ -d "$LOCK_DIR" ]; then
@@ -25,9 +24,7 @@ set_state() {
     sync 2>/dev/null || true
 }
 
-# ================== AC1304 Optimized LED Detection ==================
 detect_led() {
-    # Google Wifi AC1304 specific
     for color in Blue Green Red; do
         if [ -d "/sys/class/leds/LED0_${color}" ]; then
             LED_PATH="/sys/class/leds/LED0_${color}"
@@ -36,22 +33,14 @@ detect_led() {
         fi
     done
 
-    # Config fallback
     if [ -d "/sys/class/leds/$LED_NAME" ]; then
         LED_PATH="/sys/class/leds/$LED_NAME"
         logger -t passwallled "Using config LED: $LED_PATH"
         return 0
     fi
 
-    # General fallback
     LED_PATH=$(ls /sys/class/leds/ 2>/dev/null | grep -v mmc | head -n1)
     [ -n "$LED_PATH" ] && LED_PATH="/sys/class/leds/$LED_PATH"
-    
-    if [ -n "$LED_PATH" ]; then
-        logger -t passwallled "Using fallback LED: $LED_PATH"
-    else
-        logger -t passwallled "CRITICAL: No LED found!"
-    fi
 }
 
 detect_led
@@ -64,44 +53,32 @@ while true; do
     NOW=$(date +%s)
     STATE=$(get_state)
 
-    # ================== Metrics ==================
-    if [ -f "$CACHE" ]; then
-        READ_TIME=$(head -n1 "$CACHE" 2>/dev/null | cut -d'|' -f2 || echo 0)
-        if [ $((NOW - READ_TIME)) -lt 5 ]; then
-            CACHE_LINE=$(tail -n1 "$CACHE")
-        else
-            VPN=0; NET=0; LAT=9999; SUCCESS=0
+    # Force fresh metrics every cycle for debugging
+    VPN=0; NET=0; LAT=9999; SUCCESS=0
 
-            if ip -4 addr show | grep -Eq "tun[0-9]|wg[0-9]|ppp[0-9]"; then
-                VPN=1
-            elif pgrep -f "xray|sing-box|v2ray|hysteria|clash|tun2socks" >/dev/null 2>&1; then
-                VPN=1
-            fi
-
-            for TARGET in "$PING_TARGET_1" "$PING_TARGET_2" "$PING_TARGET_3"; do
-                if ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$TARGET" >/dev/null 2>&1; then
-                    SUCCESS=$((SUCCESS + 1))
-                    RESULT=$(ping -c 1 -W "$PING_TIMEOUT" "$TARGET" 2>/dev/null | grep -o 'time=[0-9.]\+' | cut -d= -f2 | cut -d. -f1)
-                    [ -n "$RESULT" ] && LAT=$RESULT
-                fi
-            done
-            [ $SUCCESS -ge "$MIN_SUCCESS" ] && NET=1
-
-            CACHE_LINE="v3|$NOW|$VPN|$NET|$LAT"
-            echo "$CACHE_LINE" > "$CACHE"
-        fi
-    else
-        VPN=0; NET=0; LAT=9999
-        CACHE_LINE="v3|$NOW|$VPN|$NET|$LAT"
-        echo "$CACHE_LINE" > "$CACHE"
+    if ip -4 addr show | grep -Eq "tun[0-9]|wg[0-9]|ppp[0-9]"; then
+        VPN=1
+    elif pgrep -f "xray|sing-box|v2ray|hysteria|clash|tun2socks" >/dev/null 2>&1; then
+        VPN=1
     fi
+
+    for TARGET in "$PING_TARGET_1" "$PING_TARGET_2" "$PING_TARGET_3"; do
+        if ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$TARGET" >/dev/null 2>&1; then
+            SUCCESS=$((SUCCESS + 1))
+            RESULT=$(ping -c 1 -W "$PING_TIMEOUT" "$TARGET" 2>/dev/null | grep -o 'time=[0-9.]\+' | cut -d= -f2 | cut -d. -f1)
+            [ -n "$RESULT" ] && LAT=$RESULT
+        fi
+    done
+    [ $SUCCESS -ge "$MIN_SUCCESS" ] && NET=1
+
+    CACHE_LINE="v3|$NOW|$VPN|$NET|$LAT"
+    echo "$CACHE_LINE" > "$CACHE"
 
     IFS='|' read -r _ _ VPN NET LAT _ <<EOF
 $CACHE_LINE
 EOF
     [ -z "$LAT" ] && LAT=9999
 
-    # Score
     SCORE=0
     [ "$NET" -eq 1 ] && SCORE=$((SCORE + 40))
     [ "$VPN" -eq 1 ] && SCORE=$((SCORE + 30))
@@ -145,14 +122,9 @@ EOF
     [ "$NEW" != "$STATE" ] && set_state "$NEW"
     STATE="$NEW"
 
-    echo "v3|$NOW|$VPN|$NET|$LAT|$SCORE|$STATE" > "$CACHE"
     release_lock
 
-    # ================== LED Control ==================
-    if [ -z "$LED_PATH" ] || [ ! -d "$LED_PATH" ]; then
-        detect_led
-    fi
-
+    # LED Control
     if [ -n "$LED_PATH" ] && [ -d "$LED_PATH" ]; then
         {
             echo none > "$LED_PATH/trigger" 2>/dev/null || true
@@ -174,20 +146,18 @@ EOF
                     echo 80 > "$LED_PATH/delay_off"
                     ;;
                 S1) echo default-on > "$LED_PATH/trigger" ;;
-                S0|*)
+                *) 
                     echo none > "$LED_PATH/trigger"
                     echo 0 > "$LED_PATH/brightness" 2>/dev/null || true
                     ;;
             esac
         } &
-    else
-        logger -t passwallled "Warning: No valid LED found"
     fi
 
     if [ "$STATE" != "$LAST_STATE" ]; then
-        logger -p daemon.info -t passwallled "State:${STATE} Score:${SCORE} Lat:${LAT} VPN:${VPN} Net:${NET}"
+        logger -p daemon.info -t passwallled "State:${STATE} Score:${SCORE} Lat:${LAT} VPN:${VPN} Net:${NET} Success:${SUCCESS}"
     fi
     LAST_STATE="$STATE"
 
-    sleep $([ "$STATE" = "S0" ] && echo 3 || echo 6)
+    sleep 5
 done
