@@ -1,5 +1,5 @@
 #!/bin/sh
-. /root/passwall2-led-v6/core/config.sh
+. /root/passwall2-led-ac1304/core/config.sh
 
 acquire_lock() {
     while ! mkdir "$LOCK_DIR" 2>/dev/null; do
@@ -113,7 +113,6 @@ EOF
     echo "v3|$NOW|$VPN|$NET|$LAT|$SCORE|$STATE" > "$CACHE"
     release_lock
 
-    # Safe LED Driver
     if [ ! -d "$LED_PATH" ]; then
         for L in /sys/class/leds/*; do
             case "$(basename "$L")" in
