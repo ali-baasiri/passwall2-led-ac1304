@@ -10,7 +10,8 @@ CACHE="/tmp/passwall_cache"
 STATE_FILE="/tmp/passwall_state"
 LOCK_DIR="/tmp/passwall_lock"
 
-LED_NAME="white:status"
+# === Google Wifi AC1304 Specific ===
+LED_NAME="LED0_Blue"        # تغییر به Blue (یا Green تست کنید)
 LED_PATH="/sys/class/leds/$LED_NAME"
 
 FLAP_THRESHOLD=8
