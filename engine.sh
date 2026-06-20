@@ -1,6 +1,7 @@
 #!/bin/sh
 . /root/passwall2-led-ac1304/core/config.sh
 
+# ================== Atomic Lock ==================
 acquire_lock() {
     while ! mkdir "$LOCK_DIR" 2>/dev/null; do
         if [ -d "$LOCK_DIR" ]; then
@@ -24,30 +25,33 @@ set_state() {
     sync 2>/dev/null || true
 }
 
-# ================== Robust LED Path Detection ==================
+# ================== AC1304 Optimized LED Detection ==================
 detect_led() {
-    # First try config
+    # Google Wifi AC1304 specific
+    for color in Blue Green Red; do
+        if [ -d "/sys/class/leds/LED0_${color}" ]; then
+            LED_PATH="/sys/class/leds/LED0_${color}"
+            logger -t passwallled "AC1304 LED detected: $LED_PATH"
+            return 0
+        fi
+    done
+
+    # Config fallback
     if [ -d "/sys/class/leds/$LED_NAME" ]; then
         LED_PATH="/sys/class/leds/$LED_NAME"
+        logger -t passwallled "Using config LED: $LED_PATH"
         return 0
     fi
 
-    # Smart detection for Google Wifi AC1304 and others
-    for L in /sys/class/leds/*; do
-        case "$(basename "$L")" in
-            *status*|*white*|*blue*|*internet*|*wan*|*power*)
-                if [ "$(basename "$L")" != "power" ]; then
-                    LED_PATH="$L"
-                    echo "Using LED: $LED_PATH" | logger -t passwallled
-                    return 0
-                fi
-                ;;
-        esac
-    done
-
-    # Last fallback
-    LED_PATH=$(ls /sys/class/leds/ 2>/dev/null | grep -E 'status|white|blue|wan' | head -n1)
+    # General fallback
+    LED_PATH=$(ls /sys/class/leds/ 2>/dev/null | grep -v mmc | head -n1)
     [ -n "$LED_PATH" ] && LED_PATH="/sys/class/leds/$LED_PATH"
+    
+    if [ -n "$LED_PATH" ]; then
+        logger -t passwallled "Using fallback LED: $LED_PATH"
+    else
+        logger -t passwallled "CRITICAL: No LED found!"
+    fi
 }
 
 detect_led
@@ -60,7 +64,7 @@ while true; do
     NOW=$(date +%s)
     STATE=$(get_state)
 
-    # Metrics & Logic (همان قبلی، بدون تغییر)
+    # ================== Metrics ==================
     if [ -f "$CACHE" ]; then
         READ_TIME=$(head -n1 "$CACHE" 2>/dev/null | cut -d'|' -f2 || echo 0)
         if [ $((NOW - READ_TIME)) -lt 5 ]; then
@@ -97,6 +101,7 @@ $CACHE_LINE
 EOF
     [ -z "$LAT" ] && LAT=9999
 
+    # Score
     SCORE=0
     [ "$NET" -eq 1 ] && SCORE=$((SCORE + 40))
     [ "$VPN" -eq 1 ] && SCORE=$((SCORE + 30))
@@ -109,7 +114,7 @@ EOF
     fi
     [ "$NET" -eq 0 ] && SCORE=0
 
-    # FSM ...
+    # FSM
     case "$STATE" in
         S0) NEW=$([ "$NET" -eq 1 ] && echo "S1" || echo "S0") ;;
         S1) NEW=$([ "$VPN" -eq 1 ] && echo "S2" || echo "S1") ;;
@@ -143,7 +148,7 @@ EOF
     echo "v3|$NOW|$VPN|$NET|$LAT|$SCORE|$STATE" > "$CACHE"
     release_lock
 
-    # ================== Fixed LED Control ==================
+    # ================== LED Control ==================
     if [ -z "$LED_PATH" ] || [ ! -d "$LED_PATH" ]; then
         detect_led
     fi
@@ -169,7 +174,7 @@ EOF
                     echo 80 > "$LED_PATH/delay_off"
                     ;;
                 S1) echo default-on > "$LED_PATH/trigger" ;;
-                *) 
+                S0|*)
                     echo none > "$LED_PATH/trigger"
                     echo 0 > "$LED_PATH/brightness" 2>/dev/null || true
                     ;;
